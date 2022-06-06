@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/graph-gophers/graphql-go/ast"
@@ -18,6 +19,8 @@ import (
 	"github.com/graph-gophers/graphql-go/internal/validation"
 	"github.com/graph-gophers/graphql-go/introspection"
 	"github.com/graph-gophers/graphql-go/log"
+	"github.com/graph-gophers/graphql-go/ratelimit"
+	noopratelimit "github.com/graph-gophers/graphql-go/ratelimit/noop"
 	"github.com/graph-gophers/graphql-go/trace/noop"
 	"github.com/graph-gophers/graphql-go/trace/tracer"
 )
@@ -29,6 +32,7 @@ func ParseSchema(schemaString string, resolver interface{}, opts ...SchemaOpt) (
 	s := &Schema{
 		schema:         schema.New(),
 		maxParallelism: 10,
+		rateLimiter:    &noopratelimit.RateLimiter{},
 		tracer:         noop.Tracer{},
 		logger:         &log.DefaultLogger{},
 		panicHandler:   &errors.DefaultPanicHandler{},
@@ -80,6 +84,7 @@ type Schema struct {
 	maxQueryLength           int
 	maxDepth                 int
 	maxParallelism           int
+	rateLimiter              ratelimit.RateLimiter
 	tracer                   tracer.Tracer
 	validationTracer         tracer.ValidationTracer
 	logger                   log.Logger
@@ -145,6 +150,14 @@ func MaxQueryLength(n int) SchemaOpt {
 }
 
 // Tracer is used to trace queries and fields. It defaults to [noop.Tracer].
+// RateLimiter is used to rate limit queries.
+func RateLimiter(r ratelimit.RateLimiter) SchemaOpt {
+	return func(s *Schema) {
+		s.rateLimiter = r
+	}
+}
+
+// Tracer is used to trace queries and fields. It defaults to tracer.Noop.
 func Tracer(t tracer.Tracer) SchemaOpt {
 	return func(s *Schema) {
 		s.tracer = t
@@ -229,6 +242,8 @@ type Response struct {
 	Errors     []*errors.QueryError   `json:"errors,omitempty"`
 	Data       json.RawMessage        `json:"data,omitempty"`
 	Extensions map[string]interface{} `json:"extensions,omitempty"`
+	// Optional forced StatusCode.
+	StatusCode *int `json:"-,omitempty"`
 }
 
 // Validate validates the given query with the schema.
@@ -324,12 +339,23 @@ func (s *Schema) exec(ctx context.Context, queryString string, operationName str
 		varTypes[v.Name.Name] = introspection.WrapType(t)
 	}
 	traceCtx, finish := s.tracer.TraceQuery(ctx, queryString, operationName, variables, varTypes)
-	data, errs := r.Execute(traceCtx, res, op)
+
+	var data []byte
+	var statusCode *int
+	if !s.rateLimiter.LimitQuery(ctx, queryString, operationName, variables, varTypes) {
+		data, errs = r.Execute(traceCtx, res, op)
+	} else {
+		errs = []*errors.QueryError{{Message: "rate limit exceeded"}}
+		code := http.StatusTooManyRequests
+		statusCode = &code
+	}
+
 	finish(errs)
 
 	return &Response{
-		Data:   data,
-		Errors: errs,
+		Data:       data,
+		Errors:     errs,
+		StatusCode: statusCode,
 	}
 }
 
