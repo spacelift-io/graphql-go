@@ -145,6 +145,14 @@ func MaxParallelism(n int) SchemaOpt {
 	}
 }
 
+// RateLimiter is used to rate limit queries.
+func RateLimiter(r ratelimit.RateLimiter) SchemaOpt {
+	return func(s *Schema) {
+		s.rateLimiter = r
+	}
+}
+
+// Tracer is used to trace queries and fields. It defaults to tracer.Noop.
 // MaxQueryLength specifies the maximum allowed query length in bytes. The default is 0 which disables max length checking.
 func MaxQueryLength(n int) SchemaOpt {
 	return func(s *Schema) {
