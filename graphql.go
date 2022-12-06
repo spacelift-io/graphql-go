@@ -83,6 +83,7 @@ type Schema struct {
 	useStringDescriptions    bool
 	disableIntrospection     bool
 	subscribeResolverTimeout time.Duration
+	middlewares              []Middleware
 }
 
 func (s *Schema) ASTSchema() *types.Schema {
@@ -169,6 +170,16 @@ func SubscribeResolverTimeout(timeout time.Duration) SchemaOpt {
 	}
 }
 
+// WithMiddlewares assigns middlewares to Schema.
+// Middlewares will be assigned using a for loop.
+// If we provide a slice of 2 middlewares [m1, m2], the resulting function will be
+// m2(m1(exec())), where exec() is the original call to the resolver.
+func WithMiddlewares(middlewares ...Middleware) SchemaOpt {
+	return func(s *Schema) {
+		s.middlewares = middlewares
+	}
+}
+
 // Response represents a typical response of a GraphQL server. It may be encoded to JSON directly or
 // it may be further processed to a custom response type, for example to include custom error data.
 // Errors are intentionally serialized first based on the advice in https://github.com/facebook/graphql/commit/7b40390d48680b15cb93e02d46ac5eb249689876#diff-757cea6edf0288677a9eea4cfc801d87R107
@@ -194,13 +205,17 @@ func (s *Schema) ValidateWithVariables(queryString string, variables map[string]
 }
 
 // Exec executes the given query with the schema's resolver. It panics if the schema was created
-// without a resolver. If the context get cancelled, no further resolvers will be called and a
+// without a resolver. If the context get cancelled, no further resolvers will be called and
 // the context error will be returned as soon as possible (not immediately).
 func (s *Schema) Exec(ctx context.Context, queryString string, operationName string, variables map[string]interface{}) *Response {
 	if !s.res.Resolver.IsValid() {
 		panic("schema created without resolver, can not exec")
 	}
-	return s.exec(ctx, queryString, operationName, variables, s.res)
+	execF := s.exec
+	for _, m := range s.middlewares {
+		execF = m(execF)
+	}
+	return execF(ctx, queryString, operationName, variables, s.res)
 }
 
 func (s *Schema) exec(ctx context.Context, queryString string, operationName string, variables map[string]interface{}, res *resolvable.Schema) *Response {
