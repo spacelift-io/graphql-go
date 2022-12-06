@@ -5,19 +5,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
-	"sync"
-	"testing"
-	"time"
-
 	"github.com/graph-gophers/graphql-go"
 	"github.com/graph-gophers/graphql-go/directives"
 	gqlerrors "github.com/graph-gophers/graphql-go/errors"
 	"github.com/graph-gophers/graphql-go/example/social"
 	"github.com/graph-gophers/graphql-go/example/starwars"
 	"github.com/graph-gophers/graphql-go/gqltesting"
+	"github.com/graph-gophers/graphql-go/internal/exec/resolvable"
 	"github.com/graph-gophers/graphql-go/introspection"
 	"github.com/graph-gophers/graphql-go/trace/tracer"
+	"strings"
+	"sync"
+	"testing"
+	"time"
 )
 
 type helloWorldResolver1 struct{}
@@ -4691,6 +4691,52 @@ func TestSubscriptions_In_Exec(t *testing.T) {
 			},
 		},
 	})
+}
+
+// This test assigns a hello resolver to the schema, along with 2 middlewares injected via SchemaOpt.
+// Then the test asserts that both middlewares were called and resolver output still works as expected.
+func TestMiddlewares_In_Exec(t *testing.T) {
+	resolver := &helloResolver{}
+	r := &struct {
+		*helloResolver
+	}{
+		helloResolver: resolver,
+	}
+	var m1Called, m2Called bool
+	gqltesting.RunTest(t, &gqltesting.Test{
+		Schema: graphql.MustParseSchema(`
+			type Query {
+				hello: String!
+			}
+		`, r,
+			graphql.WithMiddlewares(
+				func(next graphql.Exec) graphql.Exec {
+					return func(ctx context.Context, q string, o string, v map[string]interface{}, r *resolvable.Schema) *graphql.Response {
+						m1Called = true
+						return next(ctx, q, o, v, r)
+					}
+				},
+				func(next graphql.Exec) graphql.Exec {
+					return func(ctx context.Context, q string, o string, v map[string]interface{}, r *resolvable.Schema) *graphql.Response {
+						m2Called = true
+						return next(ctx, q, o, v, r)
+					}
+				},
+			),
+		),
+		ExpectedResult: fmt.Sprintf(`{"hello":"%s"}`, resolver.Hello()),
+		Query: `
+			query { 
+				hello
+			}
+		`,
+	})
+	if !m1Called {
+		t.Fatalf("middleware1 was set but was not called")
+	}
+	if !m2Called {
+		t.Fatalf("middleware2 was set but was not called")
+	}
 }
 
 type nilPointerReturnValue struct{}
