@@ -2,6 +2,7 @@ package graphql
 
 import (
 	"context"
+
 	"github.com/graph-gophers/graphql-go/errors"
 	"github.com/graph-gophers/graphql-go/internal/exec/resolvable"
 )
@@ -21,6 +22,18 @@ func ParseErrorsMiddleware(parseErrors func([]*errors.QueryError) []*errors.Quer
 			response.Errors = parseErrors(response.Errors)
 			// return the response
 			return response
+		}
+	}
+}
+
+func ParseInputMiddleware(parseInput func(queryString string, operationName string, variables map[string]interface{}) *Response) Middleware {
+	return func(next Exec) Exec {
+		return func(ctx context.Context, queryString string, operationName string, variables map[string]interface{}, res *resolvable.Schema) *Response {
+			if response := parseInput(queryString, operationName, variables); response != nil {
+				return response
+			}
+
+			return next(ctx, queryString, operationName, variables, res)
 		}
 	}
 }
