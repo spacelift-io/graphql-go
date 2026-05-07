@@ -290,11 +290,13 @@ func (s *Schema) Exec(ctx context.Context, queryString string, operationName str
 	if !s.res.QueryResolver.IsValid() {
 		panic("schema created without resolver, can not exec")
 	}
-	execF := s.exec
+	var execF Exec = func(ctx context.Context, queryString string, operationName string, variables map[string]interface{}) *Response {
+		return s.exec(ctx, queryString, operationName, variables, s.res)
+	}
 	for _, m := range s.middlewares {
 		execF = m(execF)
 	}
-	return execF(ctx, queryString, operationName, variables, s.res)
+	return execF(ctx, queryString, operationName, variables)
 }
 
 func (s *Schema) exec(ctx context.Context, queryString string, operationName string, variables map[string]interface{}, res *resolvable.Schema) *Response {
