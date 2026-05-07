@@ -11,7 +11,6 @@ import (
 	"github.com/graph-gophers/graphql-go/example/social"
 	"github.com/graph-gophers/graphql-go/example/starwars"
 	"github.com/graph-gophers/graphql-go/gqltesting"
-	"github.com/graph-gophers/graphql-go/internal/exec/resolvable"
 	"github.com/graph-gophers/graphql-go/introspection"
 	"github.com/graph-gophers/graphql-go/trace/tracer"
 	"strings"
@@ -4712,15 +4711,15 @@ func TestMiddlewares_In_Exec(t *testing.T) {
 		`, r,
 			graphql.WithMiddlewares(
 				func(next graphql.Exec) graphql.Exec {
-					return func(ctx context.Context, q string, o string, v map[string]interface{}, r *resolvable.Schema) *graphql.Response {
+					return func(ctx context.Context, q string, o string, v map[string]interface{}) *graphql.Response {
 						m1Called = true
-						return next(ctx, q, o, v, r)
+						return next(ctx, q, o, v)
 					}
 				},
 				func(next graphql.Exec) graphql.Exec {
-					return func(ctx context.Context, q string, o string, v map[string]interface{}, r *resolvable.Schema) *graphql.Response {
+					return func(ctx context.Context, q string, o string, v map[string]interface{}) *graphql.Response {
 						m2Called = true
-						return next(ctx, q, o, v, r)
+						return next(ctx, q, o, v)
 					}
 				},
 			),
