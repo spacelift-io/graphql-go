@@ -38,3 +38,14 @@ func InspectInputMiddleware(inspectInput func(queryString string, operationName 
 		}
 	}
 }
+
+// ResponseMiddleware lets the caller inspect and mutate the *Response
+func ResponseMiddleware(modify func(ctx context.Context, response *Response)) Middleware {
+	return func(next Exec) Exec {
+		return func(ctx context.Context, queryString string, operationName string, variables map[string]interface{}) *Response {
+			response := next(ctx, queryString, operationName, variables)
+			modify(ctx, response)
+			return response
+		}
+	}
+}
