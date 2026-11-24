@@ -15,6 +15,7 @@ import (
 	"github.com/graph-gophers/graphql-go/trace/tracer"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -5680,68 +5681,106 @@ func TestSchemaExtension(t *testing.T) {
 	}
 }
 
-type parallelismResolver struct {
+type parallelismKey struct{}
+
+type parallelismGateKey struct{}
+
+type parallelismGate struct {
 	started chan struct{}
 	release chan struct{}
 }
 
+type parallelismResolver struct{}
+
 func (r *parallelismResolver) Wait(ctx context.Context) (bool, error) {
-	r.started <- struct{}{}
-	<-r.release
+	gate := ctx.Value(parallelismGateKey{}).(*parallelismGate)
+	gate.started <- struct{}{}
+	<-gate.release
 	return true, nil
 }
 
-type parallelismKey struct{}
+func (r *parallelismResolver) Events(ctx context.Context) <-chan *parallelismResolver {
+	events := make(chan *parallelismResolver, 1)
+	events <- r
+	close(events)
+	return events
+}
 
 func TestMaxParallelismFunc(t *testing.T) {
 	const fields = 12
 
-	var query strings.Builder
-	query.WriteString("{")
+	var selection strings.Builder
+	selection.WriteString("{")
 	for i := 0; i < fields; i++ {
-		fmt.Fprintf(&query, " f%d: wait", i)
+		fmt.Fprintf(&selection, " f%d: wait", i)
 	}
-	query.WriteString(" }")
+	selection.WriteString(" }")
+
+	var calls int32
+	schema := graphql.MustParseSchema(
+		`
+			schema {
+				query: Query
+				subscription: Subscription
+			}
+
+			type Query { wait: Boolean! }
+			type Subscription { events: Event! }
+			type Event { wait: Boolean! }
+		`,
+		&parallelismResolver{},
+		graphql.MaxParallelism(5),
+		graphql.MaxParallelismFunc(func(ctx context.Context) int {
+			atomic.AddInt32(&calls, 1)
+			return ctx.Value(parallelismKey{}).(int)
+		}),
+	)
 
 	for _, tc := range []struct {
-		name     string
-		returned int
-		want     int
+		name      string
+		returned  int
+		want      int
+		subscribe bool
 	}{
 		{name: "limits the request to the returned value", returned: 3, want: 3},
 		{name: "runs resolvers one at a time", returned: 1, want: 1},
 		{name: "falls back to MaxParallelism on zero", returned: 0, want: 5},
 		{name: "falls back to MaxParallelism on a negative value", returned: -1, want: 5},
+		{name: "limits a subscription to the returned value", returned: 3, want: 3, subscribe: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			resolver := &parallelismResolver{started: make(chan struct{}, fields), release: make(chan struct{})}
-			schema := graphql.MustParseSchema(
-				`type Query { wait: Boolean! }`,
-				resolver,
-				graphql.MaxParallelism(5),
-				graphql.MaxParallelismFunc(func(ctx context.Context) int {
-					return ctx.Value(parallelismKey{}).(int)
-				}),
-			)
+			gate := &parallelismGate{started: make(chan struct{}, fields), release: make(chan struct{})}
+			ctx := context.WithValue(context.Background(), parallelismKey{}, tc.returned)
+			ctx = context.WithValue(ctx, parallelismGateKey{}, gate)
+			callsBefore := atomic.LoadInt32(&calls)
 
 			done := make(chan *graphql.Response, 1)
 			go func() {
-				done <- schema.Exec(context.WithValue(context.Background(), parallelismKey{}, tc.returned), query.String(), "", nil)
+				if !tc.subscribe {
+					done <- schema.Exec(ctx, selection.String(), "", nil)
+					return
+				}
+				events, err := schema.Subscribe(ctx, "subscription { events "+selection.String()+" }", "", nil)
+				if err != nil {
+					done <- &graphql.Response{Errors: []*gqlerrors.QueryError{{Message: err.Error()}}}
+					return
+				}
+				done <- (<-events).(*graphql.Response)
 			}()
 
 			for i := 0; i < tc.want; i++ {
 				select {
-				case <-resolver.started:
+				case <-gate.started:
 				case <-time.After(5 * time.Second):
 					t.Fatalf("only %d of %d resolvers started", i, tc.want)
 				}
 			}
 			select {
-			case <-resolver.started:
+			case <-gate.started:
 				t.Fatalf("more than %d resolvers ran in parallel", tc.want)
 			case <-time.After(50 * time.Millisecond):
 			}
-			close(resolver.release)
+			close(gate.release)
 
 			select {
 			case resp := <-done:
@@ -5750,6 +5789,10 @@ func TestMaxParallelismFunc(t *testing.T) {
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("the request did not complete")
+			}
+
+			if got := atomic.LoadInt32(&calls) - callsBefore; got != 1 {
+				t.Fatalf("the function was called %d times for one request", got)
 			}
 		})
 	}
