@@ -19,7 +19,7 @@ func (s *Schema) ToJSON() ([]byte, error) {
 		Meta:   s.res.Meta,
 		Query:  &resolvable.Object{},
 		Schema: *s.schema,
-	})
+	}, s.maxParallelism)
 	if len(result.Errors) != 0 {
 		panic(result.Errors[0])
 	}

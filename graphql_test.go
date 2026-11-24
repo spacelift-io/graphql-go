@@ -5796,4 +5796,16 @@ func TestMaxParallelismFunc(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("does not run for a schema export", func(t *testing.T) {
+		callsBefore := atomic.LoadInt32(&calls)
+
+		if _, err := schema.ToJSON(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if got := atomic.LoadInt32(&calls) - callsBefore; got != 0 {
+			t.Fatalf("the function was called %d times for a schema export", got)
+		}
+	})
 }

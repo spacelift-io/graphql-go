@@ -300,7 +300,7 @@ func (s *Schema) Exec(ctx context.Context, queryString string, operationName str
 		panic("schema created without resolver, can not exec")
 	}
 	var execF Exec = func(ctx context.Context, queryString string, operationName string, variables map[string]interface{}) *Response {
-		return s.exec(ctx, queryString, operationName, variables, s.res)
+		return s.exec(ctx, queryString, operationName, variables, s.res, s.parallelism(ctx))
 	}
 	for _, m := range s.middlewares {
 		execF = m(execF)
@@ -317,7 +317,7 @@ func (s *Schema) parallelism(ctx context.Context) int {
 	return s.maxParallelism
 }
 
-func (s *Schema) exec(ctx context.Context, queryString string, operationName string, variables map[string]interface{}, res *resolvable.Schema) *Response {
+func (s *Schema) exec(ctx context.Context, queryString string, operationName string, variables map[string]interface{}, res *resolvable.Schema, parallelism int) *Response {
 	if s.maxQueryLength > 0 && len(queryString) > s.maxQueryLength {
 		return &Response{Errors: []*errors.QueryError{errors.Errorf("query length %d exceeds the maximum allowed query length of %d bytes", len(queryString), s.maxQueryLength)}}
 	}
@@ -371,7 +371,7 @@ func (s *Schema) exec(ctx context.Context, queryString string, operationName str
 			Schema:             s.schema,
 			AllowIntrospection: s.allowIntrospection == nil || s.allowIntrospection(ctx), // allow introspection by default, i.e. when allowIntrospection is nil
 		},
-		Limiter:      make(chan struct{}, s.parallelism(ctx)),
+		Limiter:      make(chan struct{}, parallelism),
 		Tracer:       s.tracer,
 		Logger:       s.logger,
 		PanicHandler: s.panicHandler,
