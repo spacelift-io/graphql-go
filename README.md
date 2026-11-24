@@ -152,6 +152,7 @@ schema := graphql.MustParseSchema(sdl, &RootResolver{}, nil)
 - `UseFieldResolvers()` specifies whether to use struct field resolvers.
 - `MaxDepth(n int)` specifies the maximum field nesting depth in a query. The default is 0 which disables max depth checking.
 - `MaxParallelism(n int)` specifies the maximum number of resolvers per request allowed to run in parallel. The default is 10.
+- `MaxParallelismFunc(fn func(ctx context.Context) int)` specifies a function that is called once per request and returns that limit for the request. A result below 1 falls back to the value set by `MaxParallelism`.
 - `Tracer(tracer trace.Tracer)` is used to trace queries and fields. It defaults to `noop.Tracer`.
 - `Logger(logger log.Logger)` is used to log panics during query execution. It defaults to `exec.DefaultLogger`.
 - `PanicHandler(panicHandler errors.PanicHandler)` is used to transform panics into errors during query execution. It defaults to `errors.DefaultPanicHandler`.

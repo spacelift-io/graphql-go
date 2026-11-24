@@ -5679,3 +5679,78 @@ func TestSchemaExtension(t *testing.T) {
 		t.Fatalf(`expected an "awesome" schema directive, got %q`, dirs[0].Name.Name)
 	}
 }
+
+type parallelismResolver struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r *parallelismResolver) Wait(ctx context.Context) (bool, error) {
+	r.started <- struct{}{}
+	<-r.release
+	return true, nil
+}
+
+type parallelismKey struct{}
+
+func TestMaxParallelismFunc(t *testing.T) {
+	const fields = 12
+
+	var query strings.Builder
+	query.WriteString("{")
+	for i := 0; i < fields; i++ {
+		fmt.Fprintf(&query, " f%d: wait", i)
+	}
+	query.WriteString(" }")
+
+	for _, tc := range []struct {
+		name     string
+		returned int
+		want     int
+	}{
+		{name: "limits the request to the returned value", returned: 3, want: 3},
+		{name: "runs resolvers one at a time", returned: 1, want: 1},
+		{name: "falls back to MaxParallelism on zero", returned: 0, want: 5},
+		{name: "falls back to MaxParallelism on a negative value", returned: -1, want: 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolver := &parallelismResolver{started: make(chan struct{}, fields), release: make(chan struct{})}
+			schema := graphql.MustParseSchema(
+				`type Query { wait: Boolean! }`,
+				resolver,
+				graphql.MaxParallelism(5),
+				graphql.MaxParallelismFunc(func(ctx context.Context) int {
+					return ctx.Value(parallelismKey{}).(int)
+				}),
+			)
+
+			done := make(chan *graphql.Response, 1)
+			go func() {
+				done <- schema.Exec(context.WithValue(context.Background(), parallelismKey{}, tc.returned), query.String(), "", nil)
+			}()
+
+			for i := 0; i < tc.want; i++ {
+				select {
+				case <-resolver.started:
+				case <-time.After(5 * time.Second):
+					t.Fatalf("only %d of %d resolvers started", i, tc.want)
+				}
+			}
+			select {
+			case <-resolver.started:
+				t.Fatalf("more than %d resolvers ran in parallel", tc.want)
+			case <-time.After(50 * time.Millisecond):
+			}
+			close(resolver.release)
+
+			select {
+			case resp := <-done:
+				if len(resp.Errors) > 0 {
+					t.Fatalf("unexpected errors: %v", resp.Errors)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the request did not complete")
+			}
+		})
+	}
+}

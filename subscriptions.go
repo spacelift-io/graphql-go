@@ -53,7 +53,7 @@ func (s *Schema) subscribe(ctx context.Context, queryString string, operationNam
 			Vars:   variables,
 			Schema: s.schema,
 		},
-		Limiter:                  make(chan struct{}, s.maxParallelism),
+		Limiter:                  make(chan struct{}, s.parallelism(ctx)),
 		Tracer:                   s.tracer,
 		Logger:                   s.logger,
 		PanicHandler:             s.panicHandler,

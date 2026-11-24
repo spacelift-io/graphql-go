@@ -86,6 +86,7 @@ type Schema struct {
 	maxDepth                 int
 	maxSelectionSetSize      int
 	maxParallelism           int
+	maxParallelismFunc       func(ctx context.Context) int
 	rateLimiter              ratelimit.RateLimiter
 	tracer                   tracer.Tracer
 	validationTracer         tracer.ValidationTracer
@@ -151,6 +152,14 @@ func MaxSelectionSetSize(n int) SchemaOpt {
 func MaxParallelism(n int) SchemaOpt {
 	return func(s *Schema) {
 		s.maxParallelism = n
+	}
+}
+
+// MaxParallelismFunc specifies a function that is called once per request and returns the maximum number of resolvers
+// allowed to run in parallel for that request. A result below 1 falls back to the value set by [MaxParallelism].
+func MaxParallelismFunc(fn func(ctx context.Context) int) SchemaOpt {
+	return func(s *Schema) {
+		s.maxParallelismFunc = fn
 	}
 }
 
@@ -299,6 +308,15 @@ func (s *Schema) Exec(ctx context.Context, queryString string, operationName str
 	return execF(ctx, queryString, operationName, variables)
 }
 
+func (s *Schema) parallelism(ctx context.Context) int {
+	if s.maxParallelismFunc != nil {
+		if n := s.maxParallelismFunc(ctx); n > 0 {
+			return n
+		}
+	}
+	return s.maxParallelism
+}
+
 func (s *Schema) exec(ctx context.Context, queryString string, operationName string, variables map[string]interface{}, res *resolvable.Schema) *Response {
 	if s.maxQueryLength > 0 && len(queryString) > s.maxQueryLength {
 		return &Response{Errors: []*errors.QueryError{errors.Errorf("query length %d exceeds the maximum allowed query length of %d bytes", len(queryString), s.maxQueryLength)}}
@@ -353,7 +371,7 @@ func (s *Schema) exec(ctx context.Context, queryString string, operationName str
 			Schema:             s.schema,
 			AllowIntrospection: s.allowIntrospection == nil || s.allowIntrospection(ctx), // allow introspection by default, i.e. when allowIntrospection is nil
 		},
-		Limiter:      make(chan struct{}, s.maxParallelism),
+		Limiter:      make(chan struct{}, s.parallelism(ctx)),
 		Tracer:       s.tracer,
 		Logger:       s.logger,
 		PanicHandler: s.panicHandler,
