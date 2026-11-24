@@ -15,6 +15,7 @@ import (
 	"github.com/graph-gophers/graphql-go/trace/tracer"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -5678,4 +5679,133 @@ func TestSchemaExtension(t *testing.T) {
 	if name != "awesome" {
 		t.Fatalf(`expected an "awesome" schema directive, got %q`, dirs[0].Name.Name)
 	}
+}
+
+type parallelismKey struct{}
+
+type parallelismGateKey struct{}
+
+type parallelismGate struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+type parallelismResolver struct{}
+
+func (r *parallelismResolver) Wait(ctx context.Context) (bool, error) {
+	gate := ctx.Value(parallelismGateKey{}).(*parallelismGate)
+	gate.started <- struct{}{}
+	<-gate.release
+	return true, nil
+}
+
+func (r *parallelismResolver) Events(ctx context.Context) <-chan *parallelismResolver {
+	events := make(chan *parallelismResolver, 1)
+	events <- r
+	close(events)
+	return events
+}
+
+func TestMaxParallelismFunc(t *testing.T) {
+	const fields = 12
+
+	var selection strings.Builder
+	selection.WriteString("{")
+	for i := 0; i < fields; i++ {
+		fmt.Fprintf(&selection, " f%d: wait", i)
+	}
+	selection.WriteString(" }")
+
+	var calls int32
+	schema := graphql.MustParseSchema(
+		`
+			schema {
+				query: Query
+				subscription: Subscription
+			}
+
+			type Query { wait: Boolean! }
+			type Subscription { events: Event! }
+			type Event { wait: Boolean! }
+		`,
+		&parallelismResolver{},
+		graphql.MaxParallelism(5),
+		graphql.MaxParallelismFunc(func(ctx context.Context) int {
+			atomic.AddInt32(&calls, 1)
+			return ctx.Value(parallelismKey{}).(int)
+		}),
+	)
+
+	for _, tc := range []struct {
+		name      string
+		returned  int
+		want      int
+		subscribe bool
+	}{
+		{name: "limits the request to the returned value", returned: 3, want: 3},
+		{name: "runs resolvers one at a time", returned: 1, want: 1},
+		{name: "falls back to MaxParallelism on zero", returned: 0, want: 5},
+		{name: "falls back to MaxParallelism on a negative value", returned: -1, want: 5},
+		{name: "limits a subscription to the returned value", returned: 3, want: 3, subscribe: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gate := &parallelismGate{started: make(chan struct{}, fields), release: make(chan struct{})}
+			ctx := context.WithValue(context.Background(), parallelismKey{}, tc.returned)
+			ctx = context.WithValue(ctx, parallelismGateKey{}, gate)
+			callsBefore := atomic.LoadInt32(&calls)
+
+			done := make(chan *graphql.Response, 1)
+			go func() {
+				if !tc.subscribe {
+					done <- schema.Exec(ctx, selection.String(), "", nil)
+					return
+				}
+				events, err := schema.Subscribe(ctx, "subscription { events "+selection.String()+" }", "", nil)
+				if err != nil {
+					done <- &graphql.Response{Errors: []*gqlerrors.QueryError{{Message: err.Error()}}}
+					return
+				}
+				done <- (<-events).(*graphql.Response)
+			}()
+
+			for i := 0; i < tc.want; i++ {
+				select {
+				case <-gate.started:
+				case <-time.After(5 * time.Second):
+					t.Fatalf("only %d of %d resolvers started", i, tc.want)
+				}
+			}
+			select {
+			case <-gate.started:
+				t.Fatalf("more than %d resolvers ran in parallel", tc.want)
+			case <-time.After(50 * time.Millisecond):
+			}
+			close(gate.release)
+
+			select {
+			case resp := <-done:
+				if len(resp.Errors) > 0 {
+					t.Fatalf("unexpected errors: %v", resp.Errors)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the request did not complete")
+			}
+
+			if got := atomic.LoadInt32(&calls) - callsBefore; got != 1 {
+				t.Fatalf("the function was called %d times for one request", got)
+			}
+		})
+	}
+
+	t.Run("does not run for a schema export", func(t *testing.T) {
+		callsBefore := atomic.LoadInt32(&calls)
+
+		if _, err := schema.ToJSON(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if got := atomic.LoadInt32(&calls) - callsBefore; got != 0 {
+			t.Fatalf("the function was called %d times for a schema export", got)
+		}
+	})
 }
